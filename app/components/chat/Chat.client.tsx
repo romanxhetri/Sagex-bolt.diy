@@ -212,20 +212,18 @@ export const ChatImpl = memo(
 
     // Auto-deploy when AI finishes streaming
     const wasLoadingRef = useRef(false);
-    
+
     useEffect(() => {
       // Track when loading transitions from true to false
       if (wasLoadingRef.current && !isLoading) {
         console.log('[Chat] AI finished streaming, triggering auto-deploy');
-        
-        // Delay slightly to ensure all actions are processed
-        setTimeout(() => {
-          workbenchStore.triggerAutoDeploy().catch((error) => {
-            console.error('[Chat] Auto-deploy failed:', error);
-          });
-        }, 500);
+
+        // Trigger auto-deploy - it will wait for pending actions to complete
+        workbenchStore.triggerAutoDeploy().catch((error) => {
+          console.error('[Chat] Auto-deploy failed:', error);
+        });
       }
-      
+
       wasLoadingRef.current = isLoading;
     }, [isLoading]);
 

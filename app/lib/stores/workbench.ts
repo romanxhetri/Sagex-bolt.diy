@@ -57,6 +57,8 @@ export class WorkbenchStore {
   modifiedFiles = new Set<string>();
   artifactIdList: string[] = [];
   #globalExecutionQueue = Promise.resolve();
+  #pendingActionsCount = 0;
+  #autoDeployPending = false;
   constructor() {
     if (import.meta.hot) {
       import.meta.hot.data.artifacts = this.artifacts;
@@ -80,7 +82,20 @@ export class WorkbenchStore {
   }
 
   addToExecutionQueue(callback: () => Promise<void>) {
-    this.#globalExecutionQueue = this.#globalExecutionQueue.then(() => callback());
+    this.#pendingActionsCount++;
+    this.#globalExecutionQueue = this.#globalExecutionQueue.then(async () => {
+      try {
+        await callback();
+      } finally {
+        this.#pendingActionsCount--;
+
+        // Check if auto-deploy is pending and all actions are done
+        if (this.#autoDeployPending && this.#pendingActionsCount === 0) {
+          this.#autoDeployPending = false;
+          this.#executeAutoDeploy();
+        }
+      }
+    });
   }
 
   get previews() {
@@ -123,13 +138,44 @@ export class WorkbenchStore {
   /**
    * Trigger auto-deploy for the most recent artifact
    * Called when AI finishes generating a response
+   * Will wait for all pending actions to complete before deploying
    */
   async triggerAutoDeploy() {
     // Get the most recent artifact
     const lastArtifactId = this.artifactIdList[this.artifactIdList.length - 1];
-    
+
+    if (!lastArtifactId) {
+      console.log('[Workbench] No artifact to auto-deploy');
+      return;
+    }
+
+    console.log('[Workbench] Auto-deploy triggered for artifact:', lastArtifactId);
+    console.log('[Workbench] Pending actions:', this.#pendingActionsCount);
+
+    /*
+     * If there are pending actions, mark auto-deploy as pending
+     * It will be executed when all actions complete
+     */
+    if (this.#pendingActionsCount > 0) {
+      console.log('[Workbench] Actions still pending, will auto-deploy when complete');
+      this.#autoDeployPending = true;
+    } else {
+      // No pending actions, execute immediately
+      await this.#executeAutoDeploy();
+    }
+  }
+
+  /**
+   * Execute auto-deploy after ensuring all actions are complete
+   */
+  async #executeAutoDeploy() {
+    // Wait a bit more to ensure all file system operations are done
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const lastArtifactId = this.artifactIdList[this.artifactIdList.length - 1];
+
     if (lastArtifactId) {
-      console.log('[Workbench] Auto-deploy triggered for artifact:', lastArtifactId);
+      console.log('[Workbench] Executing auto-deploy for artifact:', lastArtifactId);
       await this.#autoDeployIfNeeded(lastArtifactId);
     }
   }
@@ -536,10 +582,10 @@ export class WorkbenchStore {
 
     this.artifacts.setKey(artifactId, { ...artifact, ...state });
 
-    // Auto-deploy: When artifact closes, check if we need to auto-start the dev server
-    if (state.closed === true) {
-      this.#autoDeployIfNeeded(artifactId);
-    }
+    /*
+     * Auto-deploy is now handled by triggerAutoDeploy() which is called when streaming ends
+     * This ensures all actions are complete before we try to start the dev server
+     */
   }
 
   /**
@@ -547,11 +593,7 @@ export class WorkbenchStore {
    * This ensures users can always see the website without manually asking to deploy
    */
   async #autoDeployIfNeeded(artifactId: string) {
-    const artifact = this.#getArtifact(artifactId);
-
-    if (!artifact) {
-      return;
-    }
+    console.log('[Workbench] #autoDeployIfNeeded called for artifact:', artifactId);
 
     // Check if there's already a running preview (dev server already started)
     const existingPreviews = this.#previewsStore.previews.get();
@@ -566,16 +608,62 @@ export class WorkbenchStore {
       return;
     }
 
-    // Get all actions from the artifact runner
-    const actionsMap = artifact.runner.actions.get();
-    const actionList = Object.values(actionsMap);
+    // Check ALL artifacts for file actions and start actions
+    const artifacts = this.artifacts.get();
+    let hasFileActions = false;
+    let hasStartAction = false;
+    let artifactWithFiles: string | null = null;
 
-    // Check if there were any file actions or shell actions that might have created a project
-    const hasFileActions = actionList.some((action) => action.type === 'file');
-    const hasShellActions = actionList.some((action) => action.type === 'shell');
+    for (const [id, artifact] of Object.entries(artifacts)) {
+      if (artifact.closed) {
+        const actionsMap = artifact.runner.actions.get();
+        const actionList = Object.values(actionsMap);
 
-    // If there were any project-related actions, try to auto-deploy
-    if (hasFileActions || hasShellActions) {
+        const hasFiles = actionList.some((action) => action.type === 'file');
+        const hasStart = actionList.some((action) => action.type === 'start');
+
+        if (hasFiles) {
+          hasFileActions = true;
+          artifactWithFiles = id;
+        }
+
+        if (hasStart) {
+          hasStartAction = true;
+        }
+      }
+    }
+
+    console.log('[Workbench] Artifact analysis:', {
+      hasFileActions,
+      hasStartAction,
+      artifactWithFiles,
+    });
+
+    // If there's already a start action, just wait for preview to appear
+    if (hasStartAction) {
+      console.log('[Workbench] Start action already exists, waiting for preview');
+
+      const checkPreview = (attempts = 0) => {
+        const previews = this.#previewsStore.previews.get();
+
+        if (previews.length > 0) {
+          console.log('[Workbench] Preview available, switching to preview tab');
+          this.currentView.set('preview');
+          this.showWorkbench.set(true);
+        } else if (attempts < 20) {
+          setTimeout(() => checkPreview(attempts + 1), 200);
+        } else {
+          console.warn('[Workbench] Preview not available after start action');
+        }
+      };
+
+      setTimeout(() => checkPreview(), 300);
+
+      return;
+    }
+
+    // If there were file actions, we need to start the dev server
+    if (hasFileActions && artifactWithFiles) {
       console.log('[Workbench] Auto-deploying: Project files detected, starting dev server automatically');
 
       // Check if package.json exists to determine the start command
@@ -600,15 +688,26 @@ export class WorkbenchStore {
               startCommand = 'npm run serve';
             } else if (packageJson.scripts?.preview) {
               startCommand = 'npm run preview';
+            } else {
+              // No known dev script, try npm install && npm run dev
+              startCommand = 'npm install && npm run dev';
             }
 
             console.log('[Workbench] Auto-starting dev server with command:', startCommand);
 
+            // Get the artifact that has the files
+            const targetArtifact = this.#getArtifact(artifactWithFiles);
+
+            if (!targetArtifact) {
+              console.error('[Workbench] Could not find artifact with files');
+              return;
+            }
+
             // Create a start action automatically
             const autoStartActionId = `auto-start-${Date.now()}`;
             const autoStartAction: ActionCallbackData = {
-              artifactId,
-              messageId: artifactId.split('-')[0],
+              artifactId: artifactWithFiles,
+              messageId: artifactWithFiles.split('-')[0],
               actionId: autoStartActionId,
               action: {
                 type: 'start',
@@ -617,10 +716,10 @@ export class WorkbenchStore {
             };
 
             // Add the action to the runner
-            artifact.runner.addAction(autoStartAction);
+            targetArtifact.runner.addAction(autoStartAction);
 
             // Run the action directly through the runner
-            await artifact.runner.runAction(autoStartAction);
+            await targetArtifact.runner.runAction(autoStartAction);
 
             // Switch to preview after starting
             const checkPreview = (attempts = 0) => {
@@ -634,8 +733,9 @@ export class WorkbenchStore {
                 // Poll every 200ms for up to 4 seconds
                 setTimeout(() => checkPreview(attempts + 1), 200);
               } else {
-                console.warn('[Workbench] Preview not available after auto-deploy, showing terminal');
-                // If preview not available, show terminal to see what happened
+                console.warn('[Workbench] Preview not available after auto-deploy, showing code view');
+
+                // If preview not available, show code to see what happened
                 this.currentView.set('code');
                 this.showWorkbench.set(true);
               }
@@ -651,8 +751,11 @@ export class WorkbenchStore {
       } else {
         console.log('[Workbench] No package.json found, skipping auto-deploy');
       }
+    } else {
+      console.log('[Workbench] No file actions detected, skipping auto-deploy');
     }
   }
+
   addAction(data: ActionCallbackData) {
     // this._addAction(data);
 
