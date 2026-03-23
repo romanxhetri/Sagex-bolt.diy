@@ -221,6 +221,89 @@ ${content.trim()}
 </boltArtifact>`;
   }
 
+  private _wrapInStartAction(content: string, messageId: string): string {
+    const artifactId = `artifact-${messageId}-${this._artifactCounter++}`;
+
+    return `<boltArtifact id="${artifactId}" title="Start Dev Server" type="start">
+<boltAction type="start">
+${content.trim()}
+</boltAction>
+</boltArtifact>`;
+  }
+
+  /**
+   * Check if the content is a dev server command that should run as a background process
+   * Dev server commands should use 'start' action type instead of 'shell' to be non-blocking
+   */
+  private _isDevServerCommand(content: string): boolean {
+    const trimmedContent = content.trim();
+    const lines = trimmedContent
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('#'));
+
+    if (lines.length === 0) {
+      return false;
+    }
+
+    // For multi-line content, check if the primary command is a dev server
+    const firstCommand = lines[0];
+
+    // Dev server command patterns - these run indefinitely and should be non-blocking
+    const devServerPatterns = [
+      // npm/yarn/pnpm dev server commands
+      /^(npm|yarn|pnpm)\s+(run\s+)?(dev|start|serve|preview)/,
+
+      // Direct dev server commands
+      /^(vite|next|nuxt|astro|react-scripts|vue-cli-service|webpack-dev-server)\s*/,
+
+      // Node.js development servers
+      /^node\s+.*(--watch|--inspect|dev|server)/,
+
+      // Python development servers
+      /^python\d*\s+-m\s+(http\.server|flask|uvicorn|django)/,
+
+      // Other common dev servers
+      /^(serve|http-server|live-server|nodemon)\s/,
+
+      // Framework-specific dev commands
+      /^npx\s+.*(@vitejs|next|astro|create-vite)/,
+
+      // Expo/React Native
+      /^npx\s+(expo|react-native)\s+start/,
+
+      // Package manager exec commands for dev servers
+      /^(npm|yarn|pnpm)\s+exec\s+.*(--port|--host)/,
+    ];
+
+    for (const pattern of devServerPatterns) {
+      if (pattern.test(firstCommand)) {
+        return true;
+      }
+    }
+
+    // Check if the command contains common dev server indicators
+    const devServerIndicators = [
+      /\s+--port\s+\d+/, // Port specification
+      /\s+--host\s+/, // Host specification
+      /\s+--open\s*$/, // Open in browser flag
+      /\s+-p\s+\d+/, // Short port flag
+      /localhost:\d+/, // Localhost URL
+      /0\.0\.0\.0:\d+/, // Bind to all interfaces
+    ];
+
+    for (const indicator of devServerIndicators) {
+      if (indicator.test(firstCommand)) {
+        // Additional check: make sure it's not a one-time operation like curl
+        if (!/^(curl|wget|ping|ssh)/.test(firstCommand)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   private _normalizeFilePath(filePath: string): string {
     // Remove quotes, backticks, and clean up
     filePath = filePath.replace(/[`'"]/g, '').trim();
@@ -350,6 +433,14 @@ ${content.trim()}
 
     // Empty content is not a command
     if (lines.length === 0) {
+      return false;
+    }
+
+    /*
+     * Dev server commands should be handled as 'start' actions, not shell actions
+     * Return false here so they can be caught by _isDevServerCommand check
+     */
+    if (this._isDevServerCommand(trimmedContent)) {
       return false;
     }
 
@@ -504,6 +595,14 @@ ${content.trim()}
 
       if (processed.has(blockHash)) {
         return match;
+      }
+
+      // Check if this is a dev server command first - these need non-blocking 'start' action
+      if (this._isDevServerCommand(content)) {
+        processed.add(blockHash);
+        logger.debug(`Auto-wrapped dev server command as start action: ${language}`);
+
+        return this._wrapInStartAction(content, _messageId);
       }
 
       // Check if this looks like commands to execute rather than a script file
