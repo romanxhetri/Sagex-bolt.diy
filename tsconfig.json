@@ -41,7 +41,9 @@
     "dist",
     "download",
     "sagex",
+    "sagex-source",
     "skills",
-    "upload"
+    "upload",
+    "functions"
   ]
 }

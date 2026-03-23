@@ -581,6 +581,60 @@ export class ActionRunner {
   }> {
     const trimmedCommand = command.trim();
 
+    // Handle interactive npm/npx commands that need --yes flags
+    const interactivePatterns = [
+      // npm create commands (e.g., npm create vite)
+      {
+        pattern: /^npm\s+create\s+([^\s]+)(.*)$/,
+        modify: (match: RegExpMatchArray) => `npm create ${match[1]} -- --yes${match[2] || ''}`,
+        warning: 'Added --yes flag to npm create command for non-interactive mode',
+      },
+
+      // npx create-* commands without --yes
+      {
+        pattern: /^npx\s+(create-[^\s]+)(.*)$/,
+        modify: (match: RegExpMatchArray) => `npx --yes ${match[1]} --yes${match[2] || ''}`,
+        warning: 'Added --yes flags to npx create command for non-interactive mode',
+      },
+
+      // npm install without --yes
+      {
+        pattern: /^npm\s+(i|install|add)(\s+[^\s]+)*$/,
+        modify: (match: RegExpMatchArray) => `${match[0]} --yes --no-audit --no-fund`,
+        warning: 'Added --yes flag to npm install for non-interactive mode',
+      },
+
+      // pnpm create commands
+      {
+        pattern: /^pnpm\s+create\s+([^\s]+)(.*)$/,
+        modify: (match: RegExpMatchArray) => `pnpm create ${match[1]} --yes${match[2] || ''}`,
+        warning: 'Added --yes flag to pnpm create for non-interactive mode',
+      },
+
+      // yarn create commands
+      {
+        pattern: /^yarn\s+create\s+([^\s]+)(.*)$/,
+        modify: (match: RegExpMatchArray) => `yarn create ${match[1]} --yes${match[2] || ''}`,
+        warning: 'Added --yes flag to yarn create for non-interactive mode',
+      },
+    ];
+
+    for (const { pattern, modify, warning } of interactivePatterns) {
+      const match = trimmedCommand.match(pattern);
+
+      if (match) {
+        const modifiedCommand = modify(match);
+
+        if (modifiedCommand !== trimmedCommand) {
+          return {
+            shouldModify: true,
+            modifiedCommand,
+            warning,
+          };
+        }
+      }
+    }
+
     // Handle rm commands that might fail due to missing files
     if (trimmedCommand.startsWith('rm ') && !trimmedCommand.includes(' -f')) {
       const rmMatch = trimmedCommand.match(/^rm\s+(.+)$/);
@@ -728,6 +782,36 @@ export class ActionRunner {
         pattern: /File exists/,
         title: 'File Already Exists',
         getMessage: () => `File already exists.\n\nSuggestion: Use a different name or add '-f' flag to overwrite.`,
+      },
+      {
+        pattern: /Need to install the following packages|Ok to proceed\?/i,
+        title: 'Interactive Prompt Required',
+        getMessage: () =>
+          `This command requires interactive confirmation.\n\nSuggestion: The command has been automatically modified to use --yes flags. Try running it again.`,
+      },
+      {
+        pattern: /npm ERR!.*EACCES/i,
+        title: 'Permission Error (EACCES)',
+        getMessage: () =>
+          `npm does not have permission to write to the required directory.\n\nSuggestion: Try using a different package manager or check folder permissions.`,
+      },
+      {
+        pattern: /npm ERR!.*404/i,
+        title: 'Package Not Found (404)',
+        getMessage: () =>
+          `The requested package was not found in the npm registry.\n\nSuggestion: Check the package name spelling or verify it exists on npmjs.com.`,
+      },
+      {
+        pattern: /npm ERR!.*ERESOLVE/i,
+        title: 'Dependency Resolution Error',
+        getMessage: () =>
+          `npm could not resolve dependencies due to version conflicts.\n\nSuggestion: Try running with --legacy-peer-deps or --force flags.`,
+      },
+      {
+        pattern: /network|ETIMEDOUT|ENOTFOUND/i,
+        title: 'Network Error',
+        getMessage: () =>
+          `A network error occurred while trying to fetch packages or resources.\n\nSuggestion: Check your internet connection or try again later.`,
       },
     ];
 

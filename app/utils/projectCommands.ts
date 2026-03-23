@@ -20,12 +20,30 @@ function makeNonInteractive(command: string): string {
 
   // Common interactive packages and their non-interactive flags
   const interactivePackages = [
+    // npm create commands (create-vite, create-react-app, etc.)
+    { pattern: /npm\s+create\s+([^\s]+)(?:\s+(.+))?/g, replacement: 'npm create $1 -- --yes --template default' },
+
+    // npx create commands
+    { pattern: /npx\s+create-([^\s]+)(?:\s+(.+))?/g, replacement: 'npx --yes create-$1 --yes' },
     { pattern: /npx\s+([^@\s]+@?[^\s]*)\s+init/g, replacement: 'echo "y" | npx --yes $1 init --defaults --yes' },
-    { pattern: /npx\s+create-([^\s]+)/g, replacement: 'npx --yes create-$1 --template default' },
     { pattern: /npx\s+([^@\s]+@?[^\s]*)\s+add/g, replacement: 'npx --yes $1 add --defaults --yes' },
+
+    // npm install commands
     { pattern: /npm\s+install(?!\s+--)/g, replacement: 'npm install --yes --no-audit --no-fund --silent' },
+    { pattern: /npm\s+i\s+([^\s]+)/g, replacement: 'npm install --yes --no-audit --no-fund --silent $1' },
+
+    // yarn commands
     { pattern: /yarn\s+add(?!\s+--)/g, replacement: 'yarn add --non-interactive' },
+
+    // pnpm commands
     { pattern: /pnpm\s+add(?!\s+--)/g, replacement: 'pnpm add --yes' },
+    { pattern: /pnpm\s+install(?!\s+--)/g, replacement: 'pnpm install --no-frozen-lockfile' },
+
+    // pnpm create commands
+    { pattern: /pnpm\s+create\s+([^\s]+)/g, replacement: 'pnpm create $1 --yes' },
+
+    // yarn create commands
+    { pattern: /yarn\s+create\s+([^\s]+)/g, replacement: 'yarn create $1 --yes' },
   ];
 
   let processedCommand = command;
