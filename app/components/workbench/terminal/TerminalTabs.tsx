@@ -9,15 +9,66 @@ import { classNames } from '~/utils/classNames';
 import { Terminal, type TerminalRef } from './Terminal';
 import { TerminalManager } from './TerminalManager';
 import { createScopedLogger } from '~/utils/logger';
+import { terminalDiagnostics, commandHistory, type TerminalDiagnostics } from '~/utils/shell';
 
 const logger = createScopedLogger('Terminal');
 
 const MAX_TERMINALS = 3;
 export const DEFAULT_TERMINAL_SIZE = 25;
 
+// Terminal health indicator component
+const TerminalHealthIndicator = memo(({ diagnostics }: { diagnostics: TerminalDiagnostics }) => {
+  const getStatusColor = () => {
+    switch (diagnostics.status) {
+      case 'healthy':
+        return 'bg-green-500';
+      case 'degraded':
+        return 'bg-yellow-500';
+      case 'error':
+        return 'bg-red-500';
+      case 'initializing':
+        return 'bg-blue-500 animate-pulse';
+      default:
+        return 'bg-gray-500';
+    }
+  };
+
+  const getStatusText = () => {
+    switch (diagnostics.status) {
+      case 'healthy':
+        return 'Terminal Ready';
+      case 'degraded':
+        return 'Terminal Degraded';
+      case 'error':
+        return 'Terminal Error';
+      case 'initializing':
+        return 'Initializing...';
+      default:
+        return 'Unknown';
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1.5 text-xs text-bolt-elements-textTertiary" title={getStatusText()}>
+      <div className={classNames('w-2 h-2 rounded-full', getStatusColor())}></div>
+      {diagnostics.commandCount > 0 && (
+        <span>
+          {diagnostics.commandCount} cmd{diagnostics.commandCount !== 1 ? 's' : ''}
+          {diagnostics.failedCommandCount > 0 && (
+            <span className="text-red-400 ml-1">({diagnostics.failedCommandCount} failed)</span>
+          )}
+        </span>
+      )}
+    </div>
+  );
+});
+
+TerminalHealthIndicator.displayName = 'TerminalHealthIndicator';
+
 export const TerminalTabs = memo(() => {
   const showTerminal = useStore(workbenchStore.showTerminal);
   const theme = useStore(themeStore);
+  const diagnostics = useStore(terminalDiagnostics);
 
   const terminalRefs = useRef<Map<number, TerminalRef>>(new Map());
   const terminalPanelRef = useRef<ImperativePanelHandle>(null);
@@ -25,6 +76,9 @@ export const TerminalTabs = memo(() => {
 
   const [activeTerminal, setActiveTerminal] = useState(0);
   const [terminalCount, setTerminalCount] = useState(0);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const history = useStore(commandHistory);
 
   const addTerminal = () => {
     if (terminalCount < MAX_TERMINALS) {
@@ -63,6 +117,22 @@ export const TerminalTabs = memo(() => {
     },
     [activeTerminal, terminalCount],
   );
+
+  const resetTerminal = useCallback(async () => {
+    const ref = terminalRefs.current.get(activeTerminal);
+
+    if (ref?.getTerminal()) {
+      const terminal = ref.getTerminal()!;
+      terminal.clear();
+      terminal.focus();
+
+      if (activeTerminal === 0) {
+        workbenchStore.attachBoltTerminal(terminal);
+      } else {
+        workbenchStore.attachTerminal(terminal);
+      }
+    }
+  }, [activeTerminal]);
 
   useEffect(() => {
     return () => {
@@ -191,22 +261,28 @@ export const TerminalTabs = memo(() => {
               icon="i-ph:arrow-clockwise"
               title="Reset Terminal"
               size="md"
-              onClick={() => {
-                const ref = terminalRefs.current.get(activeTerminal);
-
-                if (ref?.getTerminal()) {
-                  const terminal = ref.getTerminal()!;
-                  terminal.clear();
-                  terminal.focus();
-
-                  if (activeTerminal === 0) {
-                    workbenchStore.attachBoltTerminal(terminal);
-                  } else {
-                    workbenchStore.attachTerminal(terminal);
-                  }
-                }
-              }}
+              onClick={resetTerminal}
             />
+            <IconButton
+              icon="i-ph:clock-counter-clockwise"
+              title="Command History"
+              size="md"
+              onClick={() => setShowHistory(!showHistory)}
+              className={showHistory ? 'text-bolt-elements-item-contentAccent' : ''}
+            />
+            <IconButton
+              icon="i-ph:info"
+              title="Terminal Diagnostics"
+              size="md"
+              onClick={() => setShowDiagnostics(!showDiagnostics)}
+              className={showDiagnostics ? 'text-bolt-elements-item-contentAccent' : ''}
+            />
+            
+            {/* Health indicator */}
+            <div className="ml-2">
+              <TerminalHealthIndicator diagnostics={diagnostics} />
+            </div>
+            
             <IconButton
               className="ml-auto"
               icon="i-ph:caret-down"
@@ -215,6 +291,99 @@ export const TerminalTabs = memo(() => {
               onClick={() => workbenchStore.toggleTerminal(false)}
             />
           </div>
+          
+          {/* Command History Panel */}
+          {showHistory && (
+            <div className="bg-bolt-elements-background-depth-2 border-b border-bolt-elements-borderColor p-2 max-h-40 overflow-y-auto">
+              <div className="text-xs text-bolt-elements-textTertiary mb-2 flex justify-between items-center">
+                <span>Command History (Last 20)</span>
+                <button
+                  onClick={() => {
+                    commandHistory.set([]);
+                    setShowHistory(false);
+                  }}
+                  className="text-red-400 hover:text-red-300"
+                >
+                  Clear
+                </button>
+              </div>
+              {history.length === 0 ? (
+                <div className="text-xs text-bolt-elements-textTertiary italic">No commands in history</div>
+              ) : (
+                <div className="space-y-1">
+                  {history.slice(0, 20).map((entry, i) => (
+                    <div
+                      key={i}
+                      className={classNames(
+                        'text-xs font-mono p-1.5 rounded cursor-pointer hover:bg-bolt-elements-background-depth-3',
+                        entry.exitCode === 0 ? 'text-green-400' : 'text-red-400'
+                      )}
+                      title={`Exit code: ${entry.exitCode}`}
+                      onClick={() => {
+                        // Copy command to clipboard
+                        navigator.clipboard.writeText(entry.command);
+                        setShowHistory(false);
+                      }}
+                    >
+                      <span className="text-bolt-elements-textTertiary mr-2">${entry.exitCode}</span>
+                      {entry.command}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* Diagnostics Panel */}
+          {showDiagnostics && (
+            <div className="bg-bolt-elements-background-depth-2 border-b border-bolt-elements-borderColor p-3">
+              <div className="text-xs text-bolt-elements-textTertiary mb-2">Terminal Diagnostics</div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div>
+                  <span className="text-bolt-elements-textTertiary">Status:</span>{' '}
+                  <span className={classNames(
+                    diagnostics.status === 'healthy' ? 'text-green-400' :
+                    diagnostics.status === 'error' ? 'text-red-400' : 'text-yellow-400'
+                  )}>
+                    {diagnostics.status}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-bolt-elements-textTertiary">Commands:</span> {diagnostics.commandCount}
+                </div>
+                <div>
+                  <span className="text-bolt-elements-textTertiary">Failed:</span>{' '}
+                  <span className={diagnostics.failedCommandCount > 0 ? 'text-red-400' : ''}>
+                    {diagnostics.failedCommandCount}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-bolt-elements-textTertiary">WebContainer:</span>{' '}
+                  <span className={diagnostics.webcontainerReady ? 'text-green-400' : 'text-yellow-400'}>
+                    {diagnostics.webcontainerReady ? 'Ready' : 'Not Ready'}
+                  </span>
+                </div>
+                <div className="col-span-2">
+                  <span className="text-bolt-elements-textTertiary">Uptime:</span>{' '}
+                  {Math.floor(diagnostics.uptime / 1000)}s
+                </div>
+                {diagnostics.lastError && (
+                  <div className="col-span-2 text-red-400 truncate" title={diagnostics.lastError}>
+                    <span className="text-bolt-elements-textTertiary">Last Error:</span> {diagnostics.lastError}
+                  </div>
+                )}
+              </div>
+              {diagnostics.status === 'error' && (
+                <button
+                  onClick={resetTerminal}
+                  className="mt-2 px-2 py-1 text-xs bg-red-500/20 text-red-400 rounded hover:bg-red-500/30"
+                >
+                  Reset Terminal
+                </button>
+              )}
+            </div>
+          )}
+          
           {Array.from({ length: terminalCount + 1 }, (_, index) => {
             const isActive = activeTerminal === index;
 

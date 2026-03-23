@@ -40,6 +40,9 @@ export interface ActionAlert {
   description: string;
   content: string;
   source?: 'terminal' | 'preview'; // Add source to differentiate between terminal and preview errors
+  suggestions?: string[]; // Fix suggestions
+  isRecoverable?: boolean; // Whether the error can be recovered from
+  command?: string; // The command that caused the error
 }
 
 export interface SupabaseAlert {

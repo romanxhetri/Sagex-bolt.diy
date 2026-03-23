@@ -3,6 +3,47 @@ import type { ITerminal } from '~/types/terminal';
 import { withResolvers } from './promises';
 import { atom } from 'nanostores';
 import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
+import { createScopedLogger } from '~/utils/logger';
+
+const logger = createScopedLogger('Shell');
+
+// Terminal health status
+export type TerminalHealthStatus = 'healthy' | 'degraded' | 'error' | 'initializing';
+
+// Command history for terminal
+export interface CommandHistoryEntry {
+  command: string;
+  timestamp: number;
+  exitCode: number;
+  output?: string;
+}
+
+// Terminal diagnostic info
+export interface TerminalDiagnostics {
+  status: TerminalHealthStatus;
+  lastError?: string;
+  commandCount: number;
+  failedCommandCount: number;
+  uptime: number;
+  lastCommand?: string;
+  webcontainerReady: boolean;
+}
+
+// Global terminal diagnostics store
+export const terminalDiagnostics = atom<TerminalDiagnostics>({
+  status: 'initializing',
+  commandCount: 0,
+  failedCommandCount: 0,
+  uptime: 0,
+  webcontainerReady: false,
+});
+
+// Command history store (limited to last 100 commands)
+export const commandHistory = atom<CommandHistoryEntry[]>([]);
+
+// Max retry attempts for commands
+const MAX_RETRY_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 1000;
 
 export async function newShellProcess(webcontainer: WebContainer, terminal: ITerminal) {
   const args: string[] = [];
@@ -89,7 +130,7 @@ export async function newShellProcess(webcontainer: WebContainer, terminal: ITer
   return process;
 }
 
-export type ExecutionResult = { output: string; exitCode: number } | undefined;
+export type ExecutionResult = { output: string; exitCode: number; retried?: boolean; originalError?: string } | undefined;
 
 export class BoltShell {
   #initialized: (() => void) | undefined;
@@ -102,11 +143,93 @@ export class BoltShell {
   >();
   #outputStream: ReadableStreamDefaultReader<string> | undefined;
   #shellInputStream: WritableStreamDefaultWriter<string> | undefined;
+  #startTime: number = Date.now();
+  #commandCount: number = 0;
+  #failedCommandCount: number = 0;
+  #lastError: string | undefined;
+  #isRestarting: boolean = false;
 
   constructor() {
     this.#readyPromise = new Promise((resolve) => {
       this.#initialized = resolve;
     });
+  }
+
+  /**
+   * Get terminal diagnostics
+   */
+  getDiagnostics(): TerminalDiagnostics {
+    return {
+      status: this.#lastError ? 'error' : this.#process ? 'healthy' : 'initializing',
+      lastError: this.#lastError,
+      commandCount: this.#commandCount,
+      failedCommandCount: this.#failedCommandCount,
+      uptime: Date.now() - this.#startTime,
+      lastCommand: commandHistory.get()[0]?.command,
+      webcontainerReady: !!this.#webcontainer,
+    };
+  }
+
+  /**
+   * Clear terminal error state
+   */
+  clearError() {
+    this.#lastError = undefined;
+    terminalDiagnostics.set({
+      ...terminalDiagnostics.get(),
+      status: 'healthy',
+      lastError: undefined,
+    });
+  }
+
+  /**
+   * Restart the shell if it becomes unresponsive
+   */
+  async restartShell(): Promise<boolean> {
+    if (this.#isRestarting) {
+      logger.warn('Shell restart already in progress');
+      return false;
+    }
+
+    this.#isRestarting = true;
+    logger.info('Restarting shell...');
+
+    try {
+      // Kill existing process if any
+      if (this.#process) {
+        try {
+          this.#process.kill();
+        } catch (e) {
+          logger.warn('Failed to kill existing process:', e);
+        }
+      }
+
+      // Reset state
+      this.#process = undefined;
+      this.#outputStream = undefined;
+      this.#shellInputStream = undefined;
+
+      // Re-initialize if we have terminal and webcontainer
+      if (this.#webcontainer && this.#terminal) {
+        await this.init(this.#webcontainer, this.#terminal);
+        this.#lastError = undefined;
+        terminalDiagnostics.set({
+          ...terminalDiagnostics.get(),
+          status: 'healthy',
+          lastError: undefined,
+        });
+        logger.info('Shell restarted successfully');
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      logger.error('Failed to restart shell:', error);
+      this.#lastError = error instanceof Error ? error.message : 'Failed to restart shell';
+      return false;
+    } finally {
+      this.#isRestarting = false;
+    }
   }
 
   ready() {
@@ -215,8 +338,32 @@ export class BoltShell {
     return this.#process;
   }
 
-  async executeCommand(sessionId: string, command: string, abort?: () => void): Promise<ExecutionResult> {
+  /**
+   * Execute a command with retry logic and error recovery
+   */
+  async executeCommand(
+    sessionId: string,
+    command: string,
+    abort?: () => void,
+    retryCount: number = 0,
+  ): Promise<ExecutionResult> {
     if (!this.process || !this.terminal) {
+      // Try to restart shell if it's not available
+      if (this.#webcontainer && this.#terminal && retryCount === 0) {
+        logger.warn('Shell not ready, attempting restart...');
+        const restarted = await this.restartShell();
+
+        if (restarted) {
+          return this.executeCommand(sessionId, command, abort, retryCount + 1);
+        }
+      }
+
+      this.#lastError = 'Shell not initialized';
+      terminalDiagnostics.set({
+        ...terminalDiagnostics.get(),
+        status: 'error',
+        lastError: this.#lastError,
+      });
       return undefined;
     }
 
@@ -231,11 +378,35 @@ export class BoltShell {
      *  this.#shellInputStream?.write('\x03');
      */
     this.terminal.input('\x03');
-    await this.waitTillOscCode('prompt');
+
+    try {
+      await this.waitTillOscCode('prompt');
+    } catch (error) {
+      logger.warn('Failed to wait for prompt, shell may be unresponsive');
+
+      // Try to restart if this is the first attempt
+      if (retryCount < MAX_RETRY_ATTEMPTS) {
+        logger.info(`Retrying command (attempt ${retryCount + 1}/${MAX_RETRY_ATTEMPTS})...`);
+        const restarted = await this.restartShell();
+
+        if (restarted) {
+          return this.executeCommand(sessionId, command, abort, retryCount + 1);
+        }
+      }
+
+      return {
+        output: 'Shell is unresponsive. Try clicking the Reset Terminal button.',
+        exitCode: -1,
+        originalError: error instanceof Error ? error.message : 'Shell unresponsive',
+      };
+    }
 
     if (state && state.executionPrms) {
       await state.executionPrms;
     }
+
+    // Track command execution
+    this.#commandCount++;
 
     //start a new execution
     this.terminal.input(command.trim() + '\n');
@@ -251,11 +422,68 @@ export class BoltShell {
       try {
         resp.output = cleanTerminalOutput(resp.output);
       } catch (error) {
-        console.log('failed to format terminal output', error);
+        logger.warn('failed to format terminal output', error);
+      }
+
+      // Track failed commands
+      if (resp.exitCode !== 0) {
+        this.#failedCommandCount++;
+        this.#lastError = resp.output;
+      } else {
+        this.#lastError = undefined;
+      }
+
+      // Add to command history
+      const historyEntry: CommandHistoryEntry = {
+        command: command.trim(),
+        timestamp: Date.now(),
+        exitCode: resp.exitCode,
+        output: resp.output?.slice(0, 500), // Store first 500 chars
+      };
+
+      const currentHistory = commandHistory.get();
+      commandHistory.set([historyEntry, ...currentHistory.slice(0, 99)]);
+
+      // Update diagnostics
+      terminalDiagnostics.set({
+        ...this.getDiagnostics(),
+        commandCount: this.#commandCount,
+        failedCommandCount: this.#failedCommandCount,
+      });
+
+      // Check if we should retry the command
+      if (resp.exitCode !== 0 && retryCount < MAX_RETRY_ATTEMPTS && this.shouldRetryCommand(command, resp.output)) {
+        logger.info(`Auto-retrying failed command (attempt ${retryCount + 1}/${MAX_RETRY_ATTEMPTS})...`);
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        const retryResult = await this.executeCommand(sessionId, command, abort, retryCount + 1);
+
+        if (retryResult) {
+          retryResult.retried = true;
+          retryResult.originalError = resp.output;
+        }
+
+        return retryResult;
       }
     }
 
     return resp;
+  }
+
+  /**
+   * Determine if a command should be automatically retried
+   */
+  shouldRetryCommand(command: string, output: string): boolean {
+    const retryPatterns = [
+      /ECONNRESET/i,
+      /ETIMEDOUT/i,
+      /ENOTFOUND/i,
+      /network/i,
+      /temporarily unavailable/i,
+      /resource temporarily unavailable/i,
+      /spawn.*EAGAIN/i,
+    ];
+
+    return retryPatterns.some((pattern) => pattern.test(output));
   }
 
   async getCurrentExecutionResult(): Promise<ExecutionResult> {

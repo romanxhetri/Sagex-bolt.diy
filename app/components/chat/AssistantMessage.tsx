@@ -17,6 +17,7 @@ import type {
 } from '@ai-sdk/ui-utils';
 import { ToolInvocations } from './ToolInvocations';
 import type { ToolCallAnnotation } from '~/types/context';
+import { LLMManager } from '~/lib/modules/llm/manager';
 
 interface AssistantMessageProps {
   content: string;
@@ -58,6 +59,80 @@ function normalizedFilePath(path: string) {
 
   return normalizedPath;
 }
+
+// Helper function to format token count
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1000000) {
+    return `${(tokens / 1000000).toFixed(1)}M`;
+  }
+  if (tokens >= 1000) {
+    return `${(tokens / 1000).toFixed(1)}K`;
+  }
+  return tokens.toString();
+}
+
+// Token usage display component with context window info
+interface TokenUsageDisplayProps {
+  usage: {
+    completionTokens: number;
+    promptTokens: number;
+    totalTokens: number;
+  };
+  model?: string;
+  provider?: ProviderInfo;
+}
+
+const TokenUsageDisplay = memo(({ usage, model, provider }: TokenUsageDisplayProps) => {
+  // Get model info to find max context window
+  const llmManager = LLMManager.getInstance();
+  const modelList = llmManager.getModelList();
+  const modelInfo = modelList.find((m) => m.name === model);
+
+  const maxContext = modelInfo?.maxTokenAllowed || 128000; // Default to 128k
+  const usedContext = usage.promptTokens;
+  const remainingContext = Math.max(0, maxContext - usedContext);
+  const usagePercent = Math.min(100, (usedContext / maxContext) * 100);
+
+  // Determine color based on usage
+  const getUsageColor = (percent: number) => {
+    if (percent < 50) return 'bg-green-500';
+    if (percent < 75) return 'bg-yellow-500';
+    if (percent < 90) return 'bg-orange-500';
+    return 'bg-red-500';
+  };
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-2 text-xs">
+        <span className="font-medium">Context:</span>
+        <div className="flex items-center gap-1">
+          <span className="text-bolt-elements-textPrimary">{formatTokenCount(usedContext)}</span>
+          <span className="text-bolt-elements-textTertiary">/</span>
+          <span className="text-bolt-elements-textSecondary">{formatTokenCount(maxContext)}</span>
+        </div>
+        <span className="text-bolt-elements-textTertiary">
+          ({formatTokenCount(remainingContext)} remaining)
+        </span>
+      </div>
+      <div className="flex items-center gap-2 text-xs">
+        <span className="font-medium">Tokens:</span>
+        <span className="text-bolt-elements-textPrimary">{usage.totalTokens.toLocaleString()}</span>
+        <span className="text-bolt-elements-textTertiary">
+          (prompt: {usage.promptTokens.toLocaleString()}, completion: {usage.completionTokens.toLocaleString()})
+        </span>
+      </div>
+      {/* Context usage progress bar */}
+      <div className="w-48 h-1.5 bg-bolt-elements-background-depth-3 rounded-full overflow-hidden">
+        <div
+          className={`h-full ${getUsageColor(usagePercent)} transition-all duration-300`}
+          style={{ width: `${usagePercent}%` }}
+        />
+      </div>
+    </div>
+  );
+});
+
+TokenUsageDisplay.displayName = 'TokenUsageDisplay';
 
 export const AssistantMessage = memo(
   ({
@@ -147,9 +222,7 @@ export const AssistantMessage = memo(
             )}
             <div className="flex w-full items-center justify-between">
               {usage && (
-                <div>
-                  Tokens: {usage.totalTokens} (prompt: {usage.promptTokens}, completion: {usage.completionTokens})
-                </div>
+                <TokenUsageDisplay usage={usage} model={model} provider={provider} />
               )}
               {(onRewind || onFork) && messageId && (
                 <div className="flex gap-2 flex-col lg:flex-row ml-auto">

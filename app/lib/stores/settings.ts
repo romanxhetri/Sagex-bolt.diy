@@ -86,7 +86,7 @@ const fetchConfiguredProviders = async (): Promise<ConfiguredProvider[]> => {
 const getInitialProviderSettings = (): ProviderSetting => {
   const initialSettings: ProviderSetting = {};
 
-  // Start with default settings
+  // Start with default settings from all registered providers
   PROVIDER_LIST.forEach((provider) => {
     initialSettings[provider.name] = {
       ...provider,
@@ -104,17 +104,48 @@ const getInitialProviderSettings = (): ProviderSetting => {
     if (savedSettings) {
       try {
         const parsed = JSON.parse(savedSettings);
-        Object.entries(parsed).forEach(([key, value]) => {
-          if (initialSettings[key]) {
-            initialSettings[key].settings = (value as IProviderConfig).settings;
+
+        // First, add any new providers that weren't in saved settings
+        // This ensures new providers (like Gemini) are added with default settings
+        PROVIDER_LIST.forEach((provider) => {
+          if (!parsed[provider.name]) {
+            // New provider - enable by default if not a local provider
+            console.log(`[Settings] Adding new provider: ${provider.name}`);
+            parsed[provider.name] = {
+              settings: {
+                enabled: !LOCAL_PROVIDERS.includes(provider.name),
+              },
+            };
           }
         });
+
+        // Now merge with initial settings
+        Object.entries(parsed).forEach(([key, value]) => {
+          if (initialSettings[key]) {
+            // Merge saved settings with default settings
+            initialSettings[key] = {
+              ...initialSettings[key],
+              ...(value as IProviderConfig),
+              settings: {
+                ...initialSettings[key].settings,
+                ...((value as IProviderConfig).settings || {}),
+              },
+            };
+          }
+        });
+
+        // Save the updated settings back to localStorage to persist new providers
+        localStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(initialSettings));
       } catch (error) {
         console.error('Error parsing saved provider settings:', error);
       }
+    } else {
+      // No saved settings - save initial settings to localStorage
+      localStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(initialSettings));
     }
   }
 
+  console.log('[Settings] Initial providers:', Object.keys(initialSettings));
   return initialSettings;
 };
 

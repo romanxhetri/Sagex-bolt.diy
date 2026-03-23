@@ -30,7 +30,7 @@ export class LLMManager {
     return this._env;
   }
 
-  private async _registerProvidersFromDirectory() {
+  private _registerProvidersFromDirectory() {
     try {
       /*
        * Dynamically import all files from the providers directory
@@ -49,6 +49,10 @@ export class LLMManager {
           }
         }
       }
+
+      // Log all registered providers for debugging
+      logger.info(`Total providers registered: ${this._providers.size}`);
+      logger.info(`Providers: ${Array.from(this._providers.keys()).join(', ')}`);
     } catch (error) {
       logger.error('Error registering providers:', error);
     }

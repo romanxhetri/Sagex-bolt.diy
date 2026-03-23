@@ -37,8 +37,10 @@ type ActionsMap = MapStore<Record<string, ActionState>>;
 class ActionCommandError extends Error {
   readonly _output: string;
   readonly _header: string;
+  readonly _suggestions: string[];
+  readonly _isRecoverable: boolean;
 
-  constructor(message: string, output: string) {
+  constructor(message: string, output: string, suggestions: string[] = [], isRecoverable: boolean = false) {
     // Create a formatted message that includes both the error message and output
     const formattedMessage = `Failed To Execute Shell Command: ${message}\n\nOutput:\n${output}`;
     super(formattedMessage);
@@ -46,6 +48,8 @@ class ActionCommandError extends Error {
     // Set the output separately so it can be accessed programmatically
     this._header = message;
     this._output = output;
+    this._suggestions = suggestions;
+    this._isRecoverable = isRecoverable;
 
     // Maintain proper prototype chain
     Object.setPrototypeOf(this, ActionCommandError.prototype);
@@ -60,6 +64,12 @@ class ActionCommandError extends Error {
   }
   get header() {
     return this._header;
+  }
+  get suggestions() {
+    return this._suggestions;
+  }
+  get isRecoverable() {
+    return this._isRecoverable;
   }
 }
 
@@ -207,6 +217,10 @@ export class ActionRunner {
                 title: 'Dev Server Failed',
                 description: err.header,
                 content: err.output,
+                source: 'terminal',
+                suggestions: err.suggestions,
+                isRecoverable: err.isRecoverable,
+                command: action.content,
               });
             });
 
@@ -240,6 +254,9 @@ export class ActionRunner {
         title: 'Dev Server Failed',
         description: error.header,
         content: error.output,
+        source: 'terminal',
+        suggestions: error.suggestions,
+        isRecoverable: error.isRecoverable,
       });
 
       // re-throw the error to be caught in the promise chain
@@ -292,7 +309,15 @@ export class ActionRunner {
     await shell.ready();
 
     if (!shell || !shell.terminal || !shell.process) {
-      unreachable('Shell terminal not found');
+      // Try to restart the shell
+      logger.warn('Shell not ready, attempting restart...');
+      
+      // Give it a moment and try again
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      if (!shell || !shell.terminal || !shell.process) {
+        unreachable('Shell terminal not found after restart attempt');
+      }
     }
 
     const resp = await shell.executeCommand(this.runnerId.get(), action.content, () => {
@@ -302,10 +327,75 @@ export class ActionRunner {
     logger.debug(`${action.type} Shell Response: [exit code:${resp?.exitCode}]`);
 
     if (resp?.exitCode != 0) {
-      throw new ActionCommandError('Failed To Start Application', resp?.output || 'No Output Available');
+      const suggestions = this.#getFixSuggestions(action.content, resp?.output || '');
+      const error = new ActionCommandError(
+        'Failed To Start Application', 
+        resp?.output || 'No Output Available',
+        suggestions,
+        true // This is often recoverable
+      );
+      throw error;
     }
 
     return resp;
+  }
+
+  /**
+   * Generate fix suggestions based on command and error output
+   */
+  #getFixSuggestions(command: string, output: string): string[] {
+    const suggestions: string[] = [];
+
+    // Check for common issues
+    if (output.includes('EADDRINUSE') || output.includes('Port') && output.includes('already in use')) {
+      suggestions.push('A port is already in use. Try killing the process using that port or use a different port.');
+      suggestions.push('Run: `lsof -i :PORT` to find the process, then kill it.');
+    }
+
+    if (output.includes('ENOENT') || output.includes('no such file')) {
+      suggestions.push('A required file or directory is missing.');
+      suggestions.push('Check if all dependencies are installed: `npm install`');
+    }
+
+    if (output.includes('MODULE_NOT_FOUND')) {
+      suggestions.push('A required module is not installed.');
+      suggestions.push('Install missing dependencies: `npm install`');
+    }
+
+    if (output.includes('SyntaxError')) {
+      suggestions.push('There is a syntax error in your code.');
+      suggestions.push('Check the file mentioned in the error and fix the syntax error.');
+    }
+
+    if (output.includes('TypeError')) {
+      suggestions.push('There is a type error in your code.');
+      suggestions.push('Check the variables and functions mentioned in the error.');
+    }
+
+    if (command.includes('npm run') || command.includes('yarn') || command.includes('pnpm')) {
+      if (output.includes('missing script')) {
+        suggestions.push('The script is not defined in package.json.');
+        suggestions.push('Add the script to package.json under "scripts" section.');
+      }
+    }
+
+    if (output.includes('permission denied')) {
+      suggestions.push('Permission denied. Try running with appropriate permissions.');
+    }
+
+    if (output.includes('network') || output.includes('ECONNREFUSED') || output.includes('ETIMEDOUT')) {
+      suggestions.push('Network error. Check your internet connection.');
+      suggestions.push('If using a proxy, ensure it is configured correctly.');
+    }
+
+    // Generic fallback
+    if (suggestions.length === 0) {
+      suggestions.push('Check the error message above for specific details.');
+      suggestions.push('Try running the command manually in the terminal to debug.');
+      suggestions.push('Share this error with Bolt for more specific help.');
+    }
+
+    return suggestions;
   }
 
   async #runFileAction(action: ActionState) {
