@@ -43,6 +43,8 @@ export interface ActionAlert {
   suggestions?: string[]; // Fix suggestions
   isRecoverable?: boolean; // Whether the error can be recovered from
   command?: string; // The command that caused the error
+  autoFixCommand?: string; // Command that can automatically fix the issue
+  canAutoFix?: boolean; // Whether this error can be auto-fixed
 }
 
 export interface SupabaseAlert {

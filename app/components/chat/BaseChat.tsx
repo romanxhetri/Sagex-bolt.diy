@@ -421,6 +421,12 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                         sendMessage?.({} as any, message);
                         clearAlert?.();
                       }}
+                      autoFixCommand={actionAlert.autoFixCommand}
+                      onAutoFix={(command) => {
+                        // Execute the auto-fix command by sending it as a message
+                        sendMessage?.({} as any, `Run this fix command:\n\`\`\`sh\n${command}\n\`\`\``);
+                        clearAlert?.();
+                      }}
                     />
                   )}
                   {llmErrorAlert && <LlmErrorAlert alert={llmErrorAlert} clearAlert={() => clearLlmErrorAlert?.()} />}

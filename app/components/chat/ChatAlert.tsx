@@ -6,9 +6,11 @@ interface Props {
   alert: ActionAlert;
   clearAlert: () => void;
   postMessage: (message: string) => void;
+  autoFixCommand?: string;
+  onAutoFix?: (command: string) => void;
 }
 
-export default function ChatAlert({ alert, clearAlert, postMessage }: Props) {
+export default function ChatAlert({ alert, clearAlert, postMessage, autoFixCommand, onAutoFix }: Props) {
   const { description, content, source, suggestions, isRecoverable, command } = alert;
 
   const isPreview = source === 'preview';
@@ -45,7 +47,20 @@ export default function ChatAlert({ alert, clearAlert, postMessage }: Props) {
       promptMessage += `*This error appears to be recoverable. Please help me fix it.*\n`;
     }
 
+    // Add auto-fix suggestion if available
+    if (autoFixCommand) {
+      promptMessage += `\n**Suggested fix command:** \`${autoFixCommand}\`\n`;
+      promptMessage += `Please either run this command to fix the issue, or analyze the error and provide a solution.\n`;
+    }
+
     postMessage(promptMessage);
+  };
+
+  const handleAutoFix = () => {
+    if (autoFixCommand && onAutoFix) {
+      onAutoFix(autoFixCommand);
+      clearAlert();
+    }
   };
 
   return (
@@ -93,6 +108,22 @@ export default function ChatAlert({ alert, clearAlert, postMessage }: Props) {
                 </div>
               )}
 
+              {/* Show auto-fix option if available */}
+              {autoFixCommand && (
+                <div className="mt-3 p-3 bg-green-500/10 rounded-lg border border-green-500/20">
+                  <div className="flex items-center gap-2 text-green-400 text-xs font-medium mb-2">
+                    <div className="i-ph:magic-wand-duotone"></div>
+                    Auto-Fix Available
+                  </div>
+                  <code className="text-xs text-bolt-elements-textPrimary bg-bolt-elements-background-depth-3 px-2 py-1 rounded block mb-2">
+                    {autoFixCommand}
+                  </code>
+                  <p className="text-xs text-bolt-elements-textSecondary">
+                    This command can automatically fix the issue.
+                  </p>
+                </div>
+              )}
+
               {/* Show suggestions if available */}
               {suggestions && suggestions.length > 0 && (
                 <div className="mt-3 p-3 bg-blue-500/10 rounded-lg border border-blue-500/20">
@@ -119,7 +150,23 @@ export default function ChatAlert({ alert, clearAlert, postMessage }: Props) {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.3 }}
             >
-              <div className={classNames('flex gap-2')}>
+              <div className={classNames('flex gap-2 flex-wrap')}>
+                {/* Auto-Fix button - shown when auto-fix is available */}
+                {autoFixCommand && (
+                  <button
+                    onClick={handleAutoFix}
+                    className={classNames(
+                      `px-3 py-1.5 rounded-md text-sm font-medium`,
+                      'bg-green-600 hover:bg-green-700',
+                      'focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500',
+                      'text-white',
+                      'flex items-center gap-1.5',
+                    )}
+                  >
+                    <div className="i-ph:magic-wand-duotone"></div>
+                    Auto Fix
+                  </button>
+                )}
                 <button
                   onClick={handleAskBolt}
                   className={classNames(

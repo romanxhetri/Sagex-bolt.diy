@@ -6,6 +6,7 @@ import { createScopedLogger } from '~/utils/logger';
 import { unreachable } from '~/utils/unreachable';
 import type { ActionCallbackData } from './message-parser';
 import type { BoltShell } from '~/utils/shell';
+import { analyzeError, getFixSuggestions, type ErrorAnalysis } from './intelligent-executor';
 
 const logger = createScopedLogger('ActionRunner');
 
@@ -39,8 +40,17 @@ class ActionCommandError extends Error {
   readonly _header: string;
   readonly _suggestions: string[];
   readonly _isRecoverable: boolean;
+  readonly _errorAnalysis?: ErrorAnalysis;
+  readonly _autoFixCommand?: string;
 
-  constructor(message: string, output: string, suggestions: string[] = [], isRecoverable: boolean = false) {
+  constructor(
+    message: string,
+    output: string,
+    suggestions: string[] = [],
+    isRecoverable: boolean = false,
+    errorAnalysis?: ErrorAnalysis,
+    autoFixCommand?: string,
+  ) {
     // Create a formatted message that includes both the error message and output
     const formattedMessage = `Failed To Execute Shell Command: ${message}\n\nOutput:\n${output}`;
     super(formattedMessage);
@@ -50,6 +60,8 @@ class ActionCommandError extends Error {
     this._output = output;
     this._suggestions = suggestions;
     this._isRecoverable = isRecoverable;
+    this._errorAnalysis = errorAnalysis;
+    this._autoFixCommand = autoFixCommand;
 
     // Maintain proper prototype chain
     Object.setPrototypeOf(this, ActionCommandError.prototype);
@@ -70,6 +82,12 @@ class ActionCommandError extends Error {
   }
   get isRecoverable() {
     return this._isRecoverable;
+  }
+  get errorAnalysis() {
+    return this._errorAnalysis;
+  }
+  get autoFixCommand() {
+    return this._autoFixCommand;
   }
 }
 
@@ -221,6 +239,8 @@ export class ActionRunner {
                 suggestions: err.suggestions,
                 isRecoverable: err.isRecoverable,
                 command: action.content,
+                autoFixCommand: err.autoFixCommand,
+                canAutoFix: err.isRecoverable,
               });
             });
 
@@ -257,6 +277,8 @@ export class ActionRunner {
         source: 'terminal',
         suggestions: error.suggestions,
         isRecoverable: error.isRecoverable,
+        autoFixCommand: error.autoFixCommand,
+        canAutoFix: error.isRecoverable,
       });
 
       // re-throw the error to be caught in the promise chain
@@ -291,8 +313,17 @@ export class ActionRunner {
     logger.debug(`${action.type} Shell Response: [exit code:${resp?.exitCode}]`);
 
     if (resp?.exitCode != 0) {
+      const errorAnalysis = analyzeError(action.content, resp?.output || '', resp?.exitCode ?? 1);
+      const suggestions = getFixSuggestions(action.content, resp?.output || '', resp?.exitCode ?? 1);
       const enhancedError = this.#createEnhancedShellError(action.content, resp?.exitCode, resp?.output);
-      throw new ActionCommandError(enhancedError.title, enhancedError.details);
+      throw new ActionCommandError(
+        enhancedError.title,
+        enhancedError.details,
+        suggestions,
+        errorAnalysis.canAutoFix,
+        errorAnalysis,
+        errorAnalysis.fixCommand,
+      );
     }
   }
 
